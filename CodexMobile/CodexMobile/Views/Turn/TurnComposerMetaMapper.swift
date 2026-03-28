@@ -10,24 +10,27 @@ import Foundation
 enum TurnComposerMetaMapper {
     // ─── Model Mapping ────────────────────────────────────────────────
 
-    // Returns models sorted using the explicit product order expected by the UI.
+    // Orders models using the exact curated product sequence expected by the app.
     static func orderedModels(from models: [CodexModelOption]) -> [CodexModelOption] {
         let preferredOrder: [String] = [
-            "gpt-5.1-codex-mini",
-            "gpt-5.2",
-            "gpt-5.1-codex-max",
-            "gpt-5.2-codex",
             "gpt-5.3-codex",
+            "gpt-5.4",
+            "gpt-5.2-codex",
+            "gpt-5.1-codex-max",
+            "gpt-5.2",
+            "gpt-5.1-codex-mini",
         ]
-        let rankByModel = Dictionary(uniqueKeysWithValues: preferredOrder.enumerated().map { index, value in
-            (value, index)
-        })
+        let rankByModel = Dictionary(
+            uniqueKeysWithValues: preferredOrder.enumerated().map { index, value in
+                (value, index)
+            }
+        )
 
         return models.sorted { lhs, rhs in
             let lhsRank = rankByModel[lhs.model.lowercased()] ?? Int.max
             let rhsRank = rankByModel[rhs.model.lowercased()] ?? Int.max
             if lhsRank == rhsRank {
-                return modelTitle(for: lhs) > modelTitle(for: rhs)
+                return modelTitle(for: lhs).localizedCaseInsensitiveCompare(modelTitle(for: rhs)) == .orderedAscending
             }
             return lhsRank < rhsRank
         }
@@ -35,6 +38,10 @@ enum TurnComposerMetaMapper {
 
     // Normalizes backend ids into consistent menu labels.
     static func modelTitle(for model: CodexModelOption) -> String {
+        if model.isCustom {
+            return model.displayName
+        }
+
         switch model.model.lowercased() {
         case "gpt-5.3-codex":
             return "GPT-5.3-Codex"
@@ -64,12 +71,29 @@ enum TurnComposerMetaMapper {
                     title: reasoningTitle(for: effort)
                 )
             }
-            .sorted { lhs, rhs in
-                if lhs.rank == rhs.rank {
-                    return lhs.title > rhs.title
-                }
-                return lhs.rank > rhs.rank
+            .sorted(by: compareReasoningDisplayOptions)
+    }
+
+    static func reasoningDisplayOptions(
+        from efforts: [CodexReasoningEffortOption]
+    ) -> [TurnComposerReasoningDisplayOption] {
+        efforts
+            .map { effort in
+                TurnComposerReasoningDisplayOption(
+                    effort: effort.reasoningEffort,
+                    title: reasoningTitle(for: effort)
+                )
             }
+            .sorted(by: compareReasoningDisplayOptions)
+    }
+
+    static func reasoningTitle(for option: CodexReasoningEffortOption) -> String {
+        if let displayName = option.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !displayName.isEmpty {
+            return displayName
+        }
+
+        return reasoningTitle(for: option.reasoningEffort)
     }
 
     // Maps raw effort values to user-facing labels.
@@ -79,7 +103,7 @@ enum TurnComposerMetaMapper {
             .lowercased()
 
         switch normalized {
-        case "minimal", "low":
+        case "minimal", "minimum", "low":
             return "Low"
         case "medium":
             return "Medium"
@@ -88,9 +112,39 @@ enum TurnComposerMetaMapper {
         case "xhigh", "extra_high", "extra-high", "very_high", "very-high":
             return "Extra High"
         default:
-            return normalized.split(separator: "_")
+            return normalized
+                .split(whereSeparator: { $0 == "_" || $0 == "-" })
                 .map { $0.capitalized }
                 .joined(separator: " ")
+        }
+    }
+
+    private static func compareReasoningDisplayOptions(
+        lhs: TurnComposerReasoningDisplayOption,
+        rhs: TurnComposerReasoningDisplayOption
+    ) -> Bool {
+        if lhs.rank == rhs.rank {
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+        return lhs.rank < rhs.rank
+    }
+
+    fileprivate static func reasoningRank(for effort: String) -> Int {
+        let normalized = effort
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch normalized {
+        case "minimal", "minimum", "low":
+            return 0
+        case "medium":
+            return 1
+        case "high":
+            return 2
+        case "xhigh", "extra_high", "extra-high", "very_high", "very-high":
+            return 3
+        default:
+            return 4
         }
     }
 }
@@ -103,17 +157,6 @@ struct TurnComposerReasoningDisplayOption: Identifiable {
 
     // Provides deterministic ordering for reasoning rows.
     var rank: Int {
-        switch title {
-        case "Low":
-            return 0
-        case "Medium":
-            return 1
-        case "High":
-            return 2
-        case "Exceptional":
-            return 3
-        default:
-            return 4
-        }
+        TurnComposerMetaMapper.reasoningRank(for: effort)
     }
 }

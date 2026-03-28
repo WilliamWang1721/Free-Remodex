@@ -65,15 +65,15 @@ struct OnboardingStepPage: View {
 
                     VStack(spacing: 12) {
                         // Step label
-                        Text("STEP \(stepNumber)")
+                        Text(L10n.string("STEP %d", stepNumber))
                             .font(AppFont.caption2(weight: .bold))
                             .foregroundStyle(Color(.plan).opacity(0.7))
                             .kerning(1.5)
 
-                        Text(title)
+                        Text(LocalizedStringKey(title))
                             .font(AppFont.system(size: 28, weight: .bold))
 
-                        Text(description)
+                        Text(LocalizedStringKey(description))
                             .font(AppFont.subheadline(weight: .regular))
                             .foregroundStyle(.white.opacity(0.45))
                             .multilineTextAlignment(.center)

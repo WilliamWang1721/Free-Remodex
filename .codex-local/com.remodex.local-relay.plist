@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.remodex.local-relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/williamwang/Downloads/remodex/relay/server.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PORT</key>
+    <string>9000</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>/Users/williamwang/Downloads/remodex/relay</string>
+  <key>StandardOutPath</key>
+  <string>/Users/williamwang/.remodex/logs/relay.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/williamwang/.remodex/logs/relay.stderr.log</string>
+</dict>
+</plist>

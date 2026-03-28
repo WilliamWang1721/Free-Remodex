@@ -4,6 +4,7 @@
 // Exports: TurnTimelineView
 // Depends on: SwiftUI, TurnTimelineReducer, TurnScrollStateTracker, MessageRow
 
+import Foundation
 import SwiftUI
 
 private enum TurnAutoScrollMode {
@@ -18,6 +19,24 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockDiffText: String?
     let blockDiffEntries: [TurnFileChangeSummaryEntry]?
     let blockRevertPresentation: AssistantRevertPresentation?
+}
+
+private struct TimelineDisplayItem: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case message(CodexMessage)
+        case taskPhase(TurnTimelineTaskPhaseGroup)
+    }
+
+    let id: String
+    let kind: Kind
+
+    static func message(_ message: CodexMessage) -> TimelineDisplayItem {
+        TimelineDisplayItem(id: message.id, kind: .message(message))
+    }
+
+    static func taskPhase(_ group: TurnTimelineTaskPhaseGroup) -> TimelineDisplayItem {
+        TimelineDisplayItem(id: "task-phase-summary-\(group.id)", kind: .taskPhase(group))
+    }
 }
 
 struct TurnTimelineView<EmptyState: View, Composer: View>: View {
@@ -55,6 +74,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Cached per-render artifacts to avoid O(n) recomputation inside the body.
     @State private var cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState] = [:]
     @State private var cachedNewestStreamingMessageID: String? = nil
+    @State private var expandedTaskPhaseGroupIDs: Set<String> = []
     @State private var blockInfoInputKey: Int = 0
     @State private var scrollSessionThreadID: String?
     @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
@@ -169,6 +189,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     recomputeBlockInfoIfNeeded()
                 }
                 .onChange(of: threadID) { _, _ in
+                    expandedTaskPhaseGroupIDs.removeAll()
                     beginScrollSessionIfNeeded(force: true)
                     recomputeBlockInfoIfNeeded()
                     handleTimelineMutation(using: proxy)
@@ -215,6 +236,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     @ViewBuilder
     private var timelineRows: some View {
+        let visible = Array(visibleMessages)
+        let items = timelineDisplayItems(for: visible)
+
         if hasEarlierMessages {
             Button {
                 withAnimation(.easeOut(duration: 0.15)) {
@@ -233,22 +257,77 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             .buttonStyle(.plain)
         }
 
-        ForEach(visibleMessages) { message in
-            MessageRow(
-                message: message,
-                isRetryAvailable: isRetryAvailable,
-                onRetryUserMessage: onRetryUserMessage,
-                assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
-                // Keep streaming adornments stable while follow-bottom is active so
-                // transient bottom-geometry flips during content growth do not
-                // add/remove indicator height and make the viewport bounce.
-                showsStreamingAnimations: autoScrollMode == .followBottom
-                    && message.id == cachedNewestStreamingMessageID,
-                assistantRevertAction: onTapAssistantRevert,
-                subagentOpenAction: onTapSubagent
-            )
-            .equatable()
-            .id(message.id)
+        ForEach(items) { item in
+            switch item.kind {
+            case .message(let message):
+                MessageRow(
+                    message: message,
+                    isRetryAvailable: isRetryAvailable,
+                    onRetryUserMessage: onRetryUserMessage,
+                    assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
+                    // Keep streaming adornments stable while follow-bottom is active so
+                    // transient bottom-geometry flips during content growth do not
+                    // add/remove indicator height and make the viewport bounce.
+                    showsStreamingAnimations: autoScrollMode == .followBottom
+                        && message.id == cachedNewestStreamingMessageID,
+                    assistantRevertAction: onTapAssistantRevert,
+                    subagentOpenAction: onTapSubagent
+                )
+                .equatable()
+                .id(message.id)
+
+            case .taskPhase(let group):
+                TaskPhaseSummaryCard(
+                    group: group,
+                    isExpanded: expandedTaskPhaseGroupIDs.contains(group.id)
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        toggleTaskPhaseGroup(group.id)
+                    }
+                }
+                .id(item.id)
+            }
+        }
+    }
+
+    private func timelineDisplayItems(for messages: [CodexMessage]) -> [TimelineDisplayItem] {
+        let groups = TurnTimelineReducer.taskPhaseGroups(in: messages)
+        guard !groups.isEmpty else {
+            return messages.map(TimelineDisplayItem.message)
+        }
+
+        let groupedMessageIDs = Set(groups.flatMap(\.messageIDs))
+        let groupsByStartMessageID = Dictionary(uniqueKeysWithValues: groups.compactMap { group in
+            group.messages.first.map { ($0.id, group) }
+        })
+
+        var items: [TimelineDisplayItem] = []
+        items.reserveCapacity(messages.count + groups.count)
+
+        for message in messages {
+            if let group = groupsByStartMessageID[message.id] {
+                items.append(.taskPhase(group))
+                if expandedTaskPhaseGroupIDs.contains(group.id) {
+                    items.append(contentsOf: group.messages.map(TimelineDisplayItem.message))
+                }
+                continue
+            }
+
+            if groupedMessageIDs.contains(message.id) {
+                continue
+            }
+
+            items.append(.message(message))
+        }
+
+        return items
+    }
+
+    private func toggleTaskPhaseGroup(_ groupID: String) {
+        if expandedTaskPhaseGroupIDs.contains(groupID) {
+            expandedTaskPhaseGroupIDs.remove(groupID)
+        } else {
+            expandedTaskPhaseGroupIDs.insert(groupID)
         }
     }
 
@@ -779,6 +858,77 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         } else {
             proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
         }
+    }
+}
+
+private struct TaskPhaseSummaryCard: View {
+    let group: TurnTimelineTaskPhaseGroup
+    let isExpanded: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(AppFont.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+                    .background(Color.primary.opacity(0.05), in: Circle())
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Task activity")
+                        .font(AppFont.subheadline(weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Text("\(stepSummary) · \(elapsedSummary)")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                HStack(spacing: 4) {
+                    Text(isExpanded ? "Hide" : "Show")
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                }
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(isExpanded ? "Collapse task details" : "Expand task details")
+    }
+
+    private var stepSummary: String {
+        let noun = group.stepCount == 1 ? "step" : "steps"
+        return "\(group.stepCount) \(noun)"
+    }
+
+    private var elapsedSummary: String {
+        TurnTaskPhaseDurationFormatter.string(from: group.elapsed)
+    }
+}
+
+private enum TurnTaskPhaseDurationFormatter {
+    private static let formatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute, .second]
+        formatter.unitsStyle = .abbreviated
+        formatter.maximumUnitCount = 2
+        formatter.zeroFormattingBehavior = [.dropLeading, .dropMiddle]
+        return formatter
+    }()
+
+    static func string(from interval: TimeInterval) -> String {
+        if interval < 1 {
+            return "<1s"
+        }
+        return formatter.string(from: interval) ?? "<1s"
     }
 }
 

@@ -1,4 +1,7 @@
 // Copy this file to PrivateOverrides.xcconfig and keep the real values local.
 // Xcode will load the private file automatically when it exists.
 
+PHODEX_DEVELOPMENT_TEAM = YOURTEAMID
+PHODEX_PRODUCT_BUNDLE_IDENTIFIER = com.yourname.remodex
 PHODEX_DEFAULT_RELAY_URL =
+PHODEX_CODE_SIGN_ENTITLEMENTS = CodexMobile/CodexMobileSelfHosted.entitlements

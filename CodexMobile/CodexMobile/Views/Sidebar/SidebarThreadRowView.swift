@@ -172,7 +172,7 @@ struct SidebarThreadRowView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(isSubagentExpanded ? "Collapse subagents" : "Expand subagents")
+            .accessibilityLabel(isSubagentExpanded ? L10n.string("Collapse subagents") : L10n.string("Expand subagents"))
         }
     }
 
@@ -254,9 +254,9 @@ private struct SidebarSubagentNameLabel: View {
         let _ = codex.subagentIdentityVersion
         let source = thread.preferredSubagentLabel
             ?? codex.resolvedSubagentDisplayLabel(threadId: thread.id, agentId: thread.agentId)
-            ?? "Subagent"
+            ?? L10n.string("Subagent")
         let parsed = SubagentLabelParser.parse(source)
-        let nickname = parsed.nickname.isEmpty || CodexThread.isGenericPlaceholderTitle(parsed.nickname) ? "Subagent" : parsed.nickname
+        let nickname = parsed.nickname.isEmpty || CodexThread.isGenericPlaceholderTitle(parsed.nickname) ? L10n.string("Subagent") : parsed.nickname
         SubagentLabelParser.styledText(nickname: nickname, roleSuffix: parsed.roleSuffix)
             .font(AppFont.caption(weight: .medium))
             .lineLimit(1)
@@ -355,6 +355,6 @@ private struct SidebarThreadDiffTotalsLabel: View {
             .lineLimit(1)
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Conversation diff total")
-            .accessibilityValue("+\(totals.additions) -\(totals.deletions)")
+            .accessibilityValue(L10n.string("+%d -%d", totals.additions, totals.deletions))
     }
 }

@@ -31,14 +31,17 @@ struct TurnComposerRuntimeState {
 
     static func resolve(
         codex: CodexService,
+        threadId: String?,
         reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
     ) -> TurnComposerRuntimeState {
         return TurnComposerRuntimeState(
             reasoningDisplayOptions: reasoningDisplayOptions,
-            effectiveReasoningEffort: codex.selectedReasoningEffortForSelectedModel(),
-            selectedReasoningEffort: codex.selectedReasoningEffort,
-            reasoningMenuDisabled: reasoningDisplayOptions.isEmpty || codex.selectedModelOption() == nil,
-            selectedServiceTier: codex.selectedServiceTier
+            effectiveReasoningEffort: codex.selectedReasoningEffortForSelectedModel(threadId: threadId),
+            selectedReasoningEffort: codex.threadRuntimeOverride(for: threadId)?.overridesReasoning == true
+                ? codex.threadRuntimeOverride(for: threadId)?.reasoningEffort
+                : codex.selectedReasoningEffort,
+            reasoningMenuDisabled: reasoningDisplayOptions.isEmpty || codex.selectedModelOption(threadId: threadId) == nil,
+            selectedServiceTier: codex.effectiveServiceTier(for: threadId)
         )
     }
 }

@@ -141,19 +141,29 @@ extension CodexService {
             return
         }
 
+        let shouldUseAuthoritativeServerSnapshot = !hasPerformedThreadListSyncSinceConnect
+            && (!threads.isEmpty || !serverListedThreadIDs.isEmpty)
+        let fetchLimit = shouldUseAuthoritativeServerSnapshot ? nil : recentThreadListLimit
+
         do {
-            let activeThreads = try await fetchServerThreads(limit: recentThreadListLimit)
+            let activeThreads = try await fetchServerThreads(limit: fetchLimit)
 
             // Also fetch server-archived threads so they survive app restarts.
             var archivedThreads: [CodexThread] = []
             do {
-                archivedThreads = try await fetchServerThreads(limit: recentThreadListLimit, archived: true)
+                archivedThreads = try await fetchServerThreads(limit: fetchLimit, archived: true)
             } catch {
                 debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
             }
 
-            reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
-            debugSyncLog("sync thread/list active=\(activeThreads.count) archived=\(archivedThreads.count) local=\(threads.count)")
+            reconcileLocalThreadsWithServer(
+                activeThreads,
+                serverArchivedThreads: archivedThreads,
+                authoritativeServerSnapshot: shouldUseAuthoritativeServerSnapshot
+            )
+            hasPerformedThreadListSyncSinceConnect = true
+            let syncMode = shouldUseAuthoritativeServerSnapshot ? "authoritative" : "incremental"
+            debugSyncLog("sync thread/list mode=\(syncMode) active=\(activeThreads.count) archived=\(archivedThreads.count) local=\(threads.count)")
         } catch {
             presentConnectionErrorIfNeeded(error)
         }
@@ -184,11 +194,17 @@ extension CodexService {
 
     func reconcileLocalThreadsWithServer(
         _ serverThreads: [CodexThread],
-        serverArchivedThreads: [CodexThread] = []
+        serverArchivedThreads: [CodexThread] = [],
+        authoritativeServerSnapshot: Bool = false
     ) {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let persistedArchivedIDs = locallyArchivedThreadIDs
         let persistedDeletedIDs = locallyDeletedThreadIDs
+        let currentServerListedThreadIDs = Set(serverThreads.map(\.id) + serverArchivedThreads.map(\.id))
+        let previouslyServerListedThreadIDs = serverListedThreadIDs
+        let serverRemovedThreadIDs = authoritativeServerSnapshot
+            ? previouslyServerListedThreadIDs.subtracting(currentServerListedThreadIDs).subtracting(persistedDeletedIDs)
+            : Set<String>()
 
         var merged: [String: CodexThread] = [:]
 
@@ -239,10 +255,25 @@ extension CodexService {
             if persistedDeletedIDs.contains(localThread.id) {
                 continue
             }
+            if serverRemovedThreadIDs.contains(localThread.id) {
+                debugSyncLog("thread removed after authoritative server sync: \(localThread.id)")
+                continue
+            }
             merged[localThread.id] = localThread
         }
 
         threads = sortThreads(Array(merged.values))
+        serverListedThreadIDs = authoritativeServerSnapshot
+            ? currentServerListedThreadIDs.subtracting(persistedDeletedIDs)
+            : serverListedThreadIDs.union(currentServerListedThreadIDs).subtracting(persistedDeletedIDs)
+
+        if !serverRemovedThreadIDs.isEmpty {
+            for threadId in serverRemovedThreadIDs.sorted() {
+                removeThreadLocally(threadId, persistAsDeleted: false, persistMessages: false)
+            }
+            messagePersistence.save(messagesByThread)
+        }
+
         assistantRevertStateCacheByThread.removeAll()
         refreshBusyRepoRootsAndDependentTimelineStates()
         // Full reconciliation — always refresh all threads even if busy-roots already hit some.
@@ -469,6 +500,7 @@ extension CodexService {
         clearThreadServiceTierOverride(for: threadId)
 
         threads.removeAll { $0.id == threadId }
+        serverListedThreadIDs.remove(threadId)
         messagesByThread.removeValue(forKey: threadId)
         if persistMessages {
             messagePersistence.save(messagesByThread)
@@ -499,6 +531,7 @@ extension CodexService {
     func clearHydrationCaches() {
         hydratedThreadIDs.removeAll()
         loadingThreadIDs.removeAll()
+        hasPerformedThreadListSyncSinceConnect = false
     }
 
     func shouldTreatAsThreadNotFound(_ error: Error) -> Bool {
@@ -702,8 +735,6 @@ extension CodexService {
     }
 
     // MARK: - Persisted archive/delete sets
-
-    private static let locallyDeletedThreadIDsKey = "codex.locallyDeletedThreadIDs"
 
     var locallyArchivedThreadIDs: Set<String> {
         Set(defaults.stringArray(forKey: Self.locallyArchivedThreadIDsKey) ?? [])

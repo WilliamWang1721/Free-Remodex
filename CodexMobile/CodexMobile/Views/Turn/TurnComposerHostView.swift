@@ -90,6 +90,7 @@ struct TurnComposerHostView: View {
         )
         let runtimeState = TurnComposerRuntimeState.resolve(
             codex: codex,
+            threadId: thread.id,
             reasoningDisplayOptions: reasoningDisplayOptions
         )
         let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)

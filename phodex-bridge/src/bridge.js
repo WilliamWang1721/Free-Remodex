@@ -51,6 +51,7 @@ function startBridge({
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
+  const relayConnectBaseUrl = (config.relayConnectUrl || config.relayUrl).replace(/\/+$/, "");
   if (!relayBaseUrl) {
     console.error("[remodex] No relay URL configured.");
     console.error("[remodex] In a source checkout, run ./run-local-remodex.sh or set REMODEX_RELAY.");
@@ -67,7 +68,7 @@ function startBridge({
   const relaySession = resolveBridgeRelaySession(deviceState);
   deviceState = relaySession.deviceState;
   const sessionId = relaySession.sessionId;
-  const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
+  const relaySessionUrl = `${relayConnectBaseUrl}/${sessionId}`;
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,

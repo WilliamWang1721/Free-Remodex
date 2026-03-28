@@ -7,6 +7,11 @@
 import CryptoKit
 import Foundation
 
+struct CodexThreadListCacheSnapshot: Codable, Equatable, Sendable {
+    var threads: [CodexThread]
+    var serverListedThreadIDs: Set<String>
+}
+
 struct CodexMessagePersistence {
     // v6 encrypts the on-device message cache while keeping backward-compatible legacy fallbacks.
     private let fileName = "codex-message-history-v6.bin"
@@ -106,5 +111,97 @@ struct CodexMessagePersistence {
         value.mapValues { messages in
             messages.filter { $0.kind != .userInputPrompt }
         }
+    }
+}
+
+struct CodexThreadListPersistence: Sendable {
+    // v1 mirrors the encrypted Application Support storage pattern used for timelines.
+    private let fileName = "codex-thread-list-v1.bin"
+    private let encryptionKeyStoreKey = "codex.local.threadListKey"
+
+    // Loads the saved thread-list snapshot from disk. Returns nil when no cache exists.
+    func load() -> CodexThreadListCacheSnapshot? {
+        let decoder = JSONDecoder()
+
+        guard let data = try? Data(contentsOf: storeURL),
+              let decrypted = decryptPersistedPayload(data),
+              let value = try? decoder.decode(CodexThreadListCacheSnapshot.self, from: decrypted) else {
+            return nil
+        }
+
+        return sanitizedForPersistence(value)
+    }
+
+    // Persists the sidebar-visible thread snapshot atomically so cold launch can hydrate instantly.
+    func save(_ value: CodexThreadListCacheSnapshot) {
+        let encoder = JSONEncoder()
+        guard let plaintext = try? encoder.encode(sanitizedForPersistence(value)),
+              let data = encryptPersistedPayload(plaintext) else {
+            return
+        }
+
+        ensureParentDirectoryExists(for: storeURL)
+        try? data.write(to: storeURL, options: [.atomic])
+    }
+
+    private var storeURL: URL {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fm.temporaryDirectory
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.codexmobile.app"
+        let directory = base.appendingPathComponent(bundleID, isDirectory: true)
+        return directory.appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    private func ensureParentDirectoryExists(for fileURL: URL) {
+        let directory = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    private func encryptPersistedPayload(_ plaintext: Data) -> Data? {
+        let key = threadListKey()
+        let sealedBox = try? AES.GCM.seal(plaintext, using: key)
+        return sealedBox?.combined
+    }
+
+    private func decryptPersistedPayload(_ encryptedData: Data) -> Data? {
+        let key = threadListKey()
+        guard let sealedBox = try? AES.GCM.SealedBox(combined: encryptedData) else {
+            return nil
+        }
+        return try? AES.GCM.open(sealedBox, using: key)
+    }
+
+    private func threadListKey() -> SymmetricKey {
+        if let storedKey = SecureStore.readData(for: encryptionKeyStoreKey) {
+            return SymmetricKey(data: storedKey)
+        }
+
+        let newKey = SymmetricKey(size: .bits256)
+        let keyData = newKey.withUnsafeBytes { Data($0) }
+        SecureStore.writeData(keyData, for: encryptionKeyStoreKey)
+        return newKey
+    }
+
+    private func sanitizedForPersistence(_ value: CodexThreadListCacheSnapshot) -> CodexThreadListCacheSnapshot {
+        var seenThreadIDs = Set<String>()
+        let threads = value.threads.filter { thread in
+            let trimmedID = thread.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedID.isEmpty, !seenThreadIDs.contains(trimmedID) else {
+                return false
+            }
+            seenThreadIDs.insert(trimmedID)
+            return true
+        }
+
+        return CodexThreadListCacheSnapshot(
+            threads: threads,
+            serverListedThreadIDs: Set(
+                value.serverListedThreadIDs.compactMap { threadID in
+                    let trimmedID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return trimmedID.isEmpty ? nil : trimmedID
+                }
+            )
+        )
     }
 }

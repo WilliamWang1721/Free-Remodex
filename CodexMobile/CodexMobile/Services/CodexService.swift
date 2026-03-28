@@ -130,10 +130,47 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
 }
 
 struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
+    var modelIdentifier: String?
     var reasoningEffort: String?
     var serviceTierRawValue: String?
+    var overridesModel: Bool
     var overridesReasoning: Bool
     var overridesServiceTier: Bool
+
+    init(
+        modelIdentifier: String? = nil,
+        reasoningEffort: String? = nil,
+        serviceTierRawValue: String? = nil,
+        overridesModel: Bool = false,
+        overridesReasoning: Bool = false,
+        overridesServiceTier: Bool = false
+    ) {
+        self.modelIdentifier = modelIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.reasoningEffort = reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.serviceTierRawValue = serviceTierRawValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.overridesModel = overridesModel
+        self.overridesReasoning = overridesReasoning
+        self.overridesServiceTier = overridesServiceTier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelIdentifier
+        case reasoningEffort
+        case serviceTierRawValue
+        case overridesModel
+        case overridesReasoning
+        case overridesServiceTier
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelIdentifier = try container.decodeIfPresent(String.self, forKey: .modelIdentifier)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        serviceTierRawValue = try container.decodeIfPresent(String.self, forKey: .serviceTierRawValue)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        overridesModel = try container.decodeIfPresent(Bool.self, forKey: .overridesModel) ?? false
+        overridesReasoning = try container.decodeIfPresent(Bool.self, forKey: .overridesReasoning) ?? false
+        overridesServiceTier = try container.decodeIfPresent(Bool.self, forKey: .overridesServiceTier) ?? false
+    }
 
     var serviceTier: CodexServiceTier? {
         guard let serviceTierRawValue else {
@@ -143,7 +180,7 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
     }
 
     var isEmpty: Bool {
-        !overridesReasoning && !overridesServiceTier
+        !overridesModel && !overridesReasoning && !overridesServiceTier
     }
 }
 
@@ -279,6 +316,18 @@ final class CodexService {
     var threads: [CodexThread] = [] {
         didSet {
             rebuildThreadLookupCaches()
+            guard threads != oldValue else {
+                return
+            }
+            persistThreadListCache()
+        }
+    }
+    @ObservationIgnored var serverListedThreadIDs: Set<String> = [] {
+        didSet {
+            guard serverListedThreadIDs != oldValue else {
+                return
+            }
+            persistThreadListCache()
         }
     }
     var isConnected = false
@@ -316,6 +365,7 @@ final class CodexService {
     var messageRevisionByThread: [String: Int] = [:]
     var syncRealtimeEnabled = true
     var availableModels: [CodexModelOption] = []
+    var customModelOptions: [CodexModelOption] = []
     var selectedModelId: String?
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
@@ -397,6 +447,8 @@ final class CodexService {
     var commandExecutionDetailsByItemID: [String: CommandExecutionDetails] = [:]
     // Debounces disk writes while streaming to keep UI responsive.
     var messagePersistenceDebounceTask: Task<Void, Never>?
+    // Coalesces thread-cache writes so frequent sidebar updates do not thrash disk.
+    @ObservationIgnored var threadListPersistenceDebounceTask: Task<Void, Never>?
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -418,6 +470,7 @@ final class CodexService {
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
+    @ObservationIgnored var hasPerformedThreadListSyncSinceConnect = false
     var postConnectSyncTask: Task<Void, Never>?
     // Keeps the phone-side account UI in sync while ChatGPT login is being completed on the Mac.
     var gptAccountLoginSyncTask: Task<Void, Never>?
@@ -474,17 +527,20 @@ final class CodexService {
     let encoder: JSONEncoder
     let decoder: JSONDecoder
     let messagePersistence = CodexMessagePersistence()
+    let threadListPersistence = CodexThreadListPersistence()
     let aiChangeSetPersistence = AIChangeSetPersistence()
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering
     let remoteNotificationRegistrar: CodexRemoteNotificationRegistering
 
     static let selectedModelIdDefaultsKey = "codex.selectedModelId"
+    static let customModelOptionsDefaultsKey = "codex.customModelOptions"
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
+    static let locallyDeletedThreadIDsKey = "codex.locallyDeletedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
@@ -512,6 +568,7 @@ final class CodexService {
                 return value
             }
         }
+        let loadedThreadListSnapshot = threadListPersistence.load()
         CodexMessageOrderCounter.seed(from: loadedMessages)
         self.messagesByThread = loadedMessages
         rebuildSubagentIdentityDirectory()
@@ -532,6 +589,13 @@ final class CodexService {
         let savedModelId = defaults.string(forKey: Self.selectedModelIdDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedModelId = (savedModelId?.isEmpty == false) ? savedModelId : nil
+
+        if let savedCustomModels = defaults.data(forKey: Self.customModelOptionsDefaultsKey),
+           let decodedCustomModels = try? decoder.decode([CodexModelOption].self, from: savedCustomModels) {
+            self.customModelOptions = decodedCustomModels.filter(\.isCustom)
+        } else {
+            self.customModelOptions = []
+        }
 
         let savedReasoning = defaults.string(forKey: Self.selectedReasoningEffortDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -578,6 +642,18 @@ final class CodexService {
         } else {
             self.selectedAccessMode = .onRequest
         }
+
+        let archivedThreadIDs = Set(defaults.stringArray(forKey: Self.locallyArchivedThreadIDsKey) ?? [])
+        let deletedThreadIDs = Set(defaults.stringArray(forKey: Self.locallyDeletedThreadIDsKey) ?? [])
+        let hydratedThreadListSnapshot = Self.hydratedThreadListSnapshot(
+            persistedSnapshot: loadedThreadListSnapshot,
+            messagesByThread: loadedMessages,
+            archivedThreadIDs: archivedThreadIDs,
+            deletedThreadIDs: deletedThreadIDs
+        )
+        self.threads = hydratedThreadListSnapshot.threads
+        self.serverListedThreadIDs = hydratedThreadListSnapshot.serverListedThreadIDs
+        applyPersistedThreadCacheDecorations()
 
         if let persistedGPTAccountSnapshot = loadPersistedGPTAccountSnapshot() {
             self.gptAccountSnapshot = persistedGPTAccountSnapshot
@@ -628,6 +704,9 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
+        if loadedThreadListSnapshot == nil, !threads.isEmpty {
+            persistThreadListCacheNow()
+        }
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.
@@ -717,6 +796,140 @@ final class CodexService {
         return .connected
     }
 }
+
+extension CodexService {
+    private static func hydratedThreadListSnapshot(
+        persistedSnapshot: CodexThreadListCacheSnapshot?,
+        messagesByThread: [String: [CodexMessage]],
+        archivedThreadIDs: Set<String>,
+        deletedThreadIDs: Set<String>
+    ) -> CodexThreadListCacheSnapshot {
+        if let persistedSnapshot {
+            let threads = persistedSnapshot.threads.compactMap { thread -> CodexThread? in
+                let trimmedThreadID = thread.id.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedThreadID.isEmpty, !deletedThreadIDs.contains(trimmedThreadID) else {
+                    return nil
+                }
+
+                var hydratedThread = thread
+                hydratedThread.syncState = archivedThreadIDs.contains(trimmedThreadID) || hydratedThread.syncState == .archivedLocal
+                    ? .archivedLocal
+                    : .live
+                return hydratedThread
+            }
+
+            return CodexThreadListCacheSnapshot(
+                threads: threads,
+                serverListedThreadIDs: persistedSnapshot.serverListedThreadIDs.subtracting(deletedThreadIDs)
+            )
+        }
+
+        let fallbackThreads = messagesByThread.compactMap { threadID, messages -> CodexThread? in
+            let trimmedThreadID = threadID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedThreadID.isEmpty,
+                  !deletedThreadIDs.contains(trimmedThreadID),
+                  !messages.isEmpty else {
+                return nil
+            }
+
+            let sortedMessages = messages.sorted { lhs, rhs in
+                if lhs.orderIndex != rhs.orderIndex {
+                    return lhs.orderIndex < rhs.orderIndex
+                }
+                return lhs.createdAt < rhs.createdAt
+            }
+            let createdAt = sortedMessages.first?.createdAt
+            let updatedAt = sortedMessages.last?.createdAt
+            let preview = (sortedMessages.last { message in
+                let trimmedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedText.isEmpty else {
+                    return false
+                }
+                return message.role == .user || message.role == .assistant
+            } ?? sortedMessages.last)?.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedPreview = preview?.isEmpty == false ? preview : nil
+
+            return CodexThread(
+                id: trimmedThreadID,
+                preview: normalizedPreview,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                syncState: archivedThreadIDs.contains(trimmedThreadID) ? .archivedLocal : .live
+            )
+        }.sorted { lhs, rhs in
+            let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? Date.distantPast
+            let rhsDate = rhs.updatedAt ?? rhs.createdAt ?? Date.distantPast
+            return lhsDate > rhsDate
+        }
+
+        return CodexThreadListCacheSnapshot(
+            threads: fallbackThreads,
+            serverListedThreadIDs: Set(fallbackThreads.map(\.id))
+        )
+    }
+
+    private func applyPersistedThreadCacheDecorations() {
+        let archivedThreadIDs = locallyArchivedThreadIDs
+        let deletedThreadIDs = locallyDeletedThreadIDs
+        var normalizedServerListedThreadIDs = serverListedThreadIDs.subtracting(deletedThreadIDs)
+
+        let decoratedThreads = sortThreads(threads.compactMap { thread -> CodexThread? in
+            let trimmedThreadID = thread.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedThreadID.isEmpty, !deletedThreadIDs.contains(trimmedThreadID) else {
+                normalizedServerListedThreadIDs.remove(trimmedThreadID)
+                return nil
+            }
+
+            var decoratedThread = thread
+            if decoratedThread.forkedFromThreadId == nil {
+                decoratedThread.forkedFromThreadId = persistedForkOrigin(for: trimmedThreadID)
+            }
+            if let persistedName = persistedThreadRename(for: trimmedThreadID) {
+                decoratedThread.name = persistedName
+                decoratedThread.title = persistedName
+            }
+            decoratedThread.syncState = archivedThreadIDs.contains(trimmedThreadID) || decoratedThread.syncState == .archivedLocal
+                ? .archivedLocal
+                : .live
+            return decoratedThread
+        })
+
+        threads = decoratedThreads
+        serverListedThreadIDs = normalizedServerListedThreadIDs
+    }
+
+    private func persistThreadListCacheNow() {
+        threadListPersistenceDebounceTask?.cancel()
+        threadListPersistenceDebounceTask = nil
+        threadListPersistence.save(
+            CodexThreadListCacheSnapshot(
+                threads: threads,
+                serverListedThreadIDs: serverListedThreadIDs
+            )
+        )
+    }
+
+    private func persistThreadListCache() {
+        threadListPersistenceDebounceTask?.cancel()
+        threadListPersistenceDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self else {
+                return
+            }
+
+            let snapshot = CodexThreadListCacheSnapshot(
+                threads: self.threads,
+                serverListedThreadIDs: self.serverListedThreadIDs
+            )
+            self.threadListPersistenceDebounceTask = nil
+
+            Task.detached { [threadListPersistence] in
+                threadListPersistence.save(snapshot)
+            }
+        }
+    }
+}
+
 
 private extension String {
     var nilIfEmpty: String? {

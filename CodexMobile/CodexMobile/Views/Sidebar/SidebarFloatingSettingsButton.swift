@@ -48,6 +48,6 @@ struct SidebarMacConnectionStatusView: View {
     }
 
     private var statusTitle: String {
-        isConnected ? "Connected to Mac" : "Saved Mac"
+        isConnected ? L10n.string("Connected to Mac") : L10n.string("Saved Mac")
     }
 }

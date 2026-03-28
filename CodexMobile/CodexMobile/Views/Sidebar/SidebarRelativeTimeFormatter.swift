@@ -24,23 +24,23 @@ enum SidebarRelativeTimeFormatter {
         let year: TimeInterval = 365 * day
 
         if interval >= year {
-            return "\(Int(interval / year))y"
+            return L10n.string("%dy", Int(interval / year))
         }
         if interval >= month {
-            return "\(Int(interval / month))mo"
+            return L10n.string("%dmo", Int(interval / month))
         }
         if interval >= week {
-            return "\(Int(interval / week))w"
+            return L10n.string("%dw", Int(interval / week))
         }
         if interval >= day {
-            return "\(Int(interval / day))d"
+            return L10n.string("%dd", Int(interval / day))
         }
         if interval >= hour {
-            return "\(Int(interval / hour))h"
+            return L10n.string("%dh", Int(interval / hour))
         }
         if interval >= minute {
-            return "\(Int(interval / minute))m"
+            return L10n.string("%dm", Int(interval / minute))
         }
-        return "now"
+        return L10n.string("now")
     }
 }

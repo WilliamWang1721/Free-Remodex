@@ -123,7 +123,7 @@ final class ContentViewModel {
         }
 
         codex.shouldAutoReconnectOnForeground = false
-        codex.connectionRecoveryState = .retrying(attempt: 0, message: "Preparing reconnect...")
+        codex.connectionRecoveryState = .retrying(attempt: 0, message: L10n.string("Preparing reconnect..."))
         codex.lastErrorMessage = nil
         codex.cancelTrustedSessionResolve()
 
@@ -224,7 +224,7 @@ final class ContentViewModel {
             do {
                 codex.connectionRecoveryState = .retrying(
                     attempt: max(1, attempt + 1),
-                    message: "Reconnecting..."
+                    message: L10n.string("Reconnecting...")
                 )
                 try await connect(codex: codex, serverURL: fullURL)
                 codex.connectionRecoveryState = .idle
@@ -282,7 +282,7 @@ final class ContentViewModel {
         if attempt >= maxAttempts {
             codex.shouldAutoReconnectOnForeground = false
             codex.connectionRecoveryState = .idle
-            codex.lastErrorMessage = "Could not reconnect. Tap Reconnect to try again."
+            codex.lastErrorMessage = L10n.string("Could not reconnect. Tap Reconnect to try again.")
         }
     }
 }
@@ -332,7 +332,7 @@ extension ContentViewModel {
             if attemptIndex > 0 {
                 codex.connectionRecoveryState = .retrying(
                     attempt: attemptIndex,
-                    message: "Connection timed out. Retrying..."
+                    message: L10n.string("Connection timed out. Retrying...")
                 )
             }
 
@@ -444,7 +444,7 @@ extension ContentViewModel {
         case .unsupportedRelay:
             if !codex.hasSavedRelaySession {
                 codex.connectionRecoveryState = .idle
-                codex.lastErrorMessage = "This relay needs a fresh QR scan before trusted reconnect is available."
+                codex.lastErrorMessage = L10n.string("This relay needs a fresh QR scan before trusted reconnect is available.")
                 return .stop
             }
             return .fallbackToSaved

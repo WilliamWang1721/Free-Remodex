@@ -40,12 +40,14 @@ extension CodexService {
     // Preserves the older startThread symbol used by most call sites and incremental builds.
     func startThread(
         preferredProjectPath: String? = nil,
-        runtimeOverride: CodexThreadRuntimeOverride? = nil
+        runtimeOverride: CodexThreadRuntimeOverride? = nil,
+        modelIdentifierOverride: String? = nil
     ) async throws -> CodexThread {
         try await startThreadImpl(
             preferredProjectPath: preferredProjectPath,
             pendingComposerAction: nil,
-            runtimeOverride: runtimeOverride
+            runtimeOverride: runtimeOverride,
+            modelIdentifierOverride: modelIdentifierOverride
         )
     }
 
@@ -53,12 +55,14 @@ extension CodexService {
     func startThread(
         preferredProjectPath: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction,
-        runtimeOverride: CodexThreadRuntimeOverride? = nil
+        runtimeOverride: CodexThreadRuntimeOverride? = nil,
+        modelIdentifierOverride: String? = nil
     ) async throws -> CodexThread {
         try await startThreadImpl(
             preferredProjectPath: preferredProjectPath,
             pendingComposerAction: pendingComposerAction,
-            runtimeOverride: runtimeOverride
+            runtimeOverride: runtimeOverride,
+            modelIdentifierOverride: modelIdentifierOverride
         )
     }
 
@@ -66,9 +70,13 @@ extension CodexService {
     private func startThreadImpl(
         preferredProjectPath: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction? = nil,
-        runtimeOverride: CodexThreadRuntimeOverride? = nil
+        runtimeOverride: CodexThreadRuntimeOverride? = nil,
+        modelIdentifierOverride: String? = nil
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
+        let explicitModelIdentifier = modelIdentifierOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedModelIdentifier = (explicitModelIdentifier?.isEmpty == false ? explicitModelIdentifier : nil)
+            ?? runtimeModelIdentifierForTurn()
         // Brand-new chats start from app defaults; per-chat overrides are inherited only on continuation.
         let explicitServiceTier = runtimeOverride?.overridesServiceTier == true
             ? runtimeOverride?.serviceTierRawValue
@@ -77,7 +85,7 @@ extension CodexService {
 
         while true {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
-                modelIdentifier: runtimeModelIdentifierForTurn(),
+                modelIdentifier: resolvedModelIdentifier,
                 preferredProjectPath: normalizedPreferredProjectPath,
                 serviceTier: includesServiceTier ? explicitServiceTier : nil
             )
@@ -105,6 +113,13 @@ extension CodexService {
                 upsertThread(thread)
                 resumedThreadIDs.insert(thread.id)
                 activeThreadId = thread.id
+                if resolvedModelIdentifier != nil || runtimeOverride != nil {
+                    inheritRuntimeSelections(
+                        from: thread.id,
+                        fallbackModelIdentifier: resolvedModelIdentifier,
+                        fallbackRuntimeOverride: runtimeOverride
+                    )
+                }
                 return thread
             } catch {
                 guard consumeUnsupportedServiceTier(error, includesServiceTier: &includesServiceTier) else {
@@ -140,9 +155,11 @@ extension CodexService {
         }
 
         let initialThreadId = try await resolveThreadID(threadId)
+        inheritRuntimeSelections(from: initialThreadId)
 
         do {
             try await ensureThreadResumed(threadId: initialThreadId)
+            inheritRuntimeSelections(from: initialThreadId)
         } catch {
             if shouldTreatAsThreadNotFound(error) {
                 handleMissingThread(initialThreadId)
@@ -600,8 +617,25 @@ extension CodexService {
     }
 
     func createContinuationThread(from archivedThreadId: String) async throws -> CodexThread {
-        let continuationRuntimeOverride = threadRuntimeOverride(for: archivedThreadId)
-        let continuationThread = try await startThread(runtimeOverride: continuationRuntimeOverride)
+        let sourceModelIdentifier = trimmedModelIdentifier(thread(for: archivedThreadId)?.model)
+        var continuationRuntimeOverride = threadRuntimeOverride(for: archivedThreadId)
+        if let sourceModelIdentifier,
+           continuationRuntimeOverride?.overridesModel != true {
+            if continuationRuntimeOverride == nil {
+                continuationRuntimeOverride = CodexThreadRuntimeOverride()
+            }
+            continuationRuntimeOverride?.modelIdentifier = sourceModelIdentifier
+            continuationRuntimeOverride?.overridesModel = true
+        }
+        inheritRuntimeSelections(
+            from: archivedThreadId,
+            fallbackModelIdentifier: sourceModelIdentifier,
+            fallbackRuntimeOverride: continuationRuntimeOverride
+        )
+        let continuationThread = try await startThread(
+            runtimeOverride: continuationRuntimeOverride,
+            modelIdentifierOverride: sourceModelIdentifier
+        )
         appendSystemMessage(
             threadId: continuationThread.id,
             text: "Continued from archived thread `\(archivedThreadId)`"
@@ -632,13 +666,19 @@ extension CodexService {
         if let workingDirectory = resolvedProjectPath {
             params["cwd"] = .string(workingDirectory)
         }
-        if let modelIdentifier = modelIdentifierOverride ?? runtimeModelIdentifierForTurn() {
+        if let modelIdentifier = modelIdentifierOverride ?? runtimeModelIdentifierForTurn(threadId: threadId) {
             params["model"] = .string(modelIdentifier)
         }
         let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
 
         guard let resultObject = response.result?.objectValue else {
             resumedThreadIDs.insert(threadId)
+            if activeThreadId == threadId || modelIdentifierOverride != nil {
+                inheritRuntimeSelections(
+                    from: threadId,
+                    fallbackModelIdentifier: modelIdentifierOverride
+                )
+            }
             return nil
         }
 
@@ -676,6 +716,12 @@ extension CodexService {
 
         hydratedThreadIDs.insert(threadId)
         resumedThreadIDs.insert(threadId)
+        if activeThreadId == threadId || modelIdentifierOverride != nil {
+            inheritRuntimeSelections(
+                from: threadId,
+                fallbackModelIdentifier: modelIdentifierOverride
+            )
+        }
         return resumedThread
     }
 
@@ -1068,7 +1114,7 @@ extension CodexService {
         ]
         // Keep the legacy top-level fields populated so plan-mode turns still honor
         // the user's selected model on runtimes that do not read collaboration settings.
-        if let modelIdentifier = runtimeModelIdentifierForTurn() {
+        if let modelIdentifier = runtimeModelIdentifierForTurn(threadId: threadId) {
             params["model"] = .string(modelIdentifier)
         }
         if let effort = selectedReasoningEffortForSelectedModel(threadId: threadId) {
@@ -1096,9 +1142,9 @@ extension CodexService {
             return nil
         }
 
-        let resolvedModel = runtimeModelIdentifierForTurn()
+        let resolvedModel = runtimeModelIdentifierForTurn(threadId: threadId)
             ?? selectedModelOption()?.model
-            ?? availableModels.first?.model
+            ?? mergedAvailableModels().first?.model
             ?? selectedModelId
         guard let resolvedModel,
               !resolvedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

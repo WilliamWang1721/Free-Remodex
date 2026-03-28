@@ -8,10 +8,11 @@ import UIKit
 
 struct SettingsView: View {
     @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
 
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
     @State private var isShowingMacNameSheet = false
+    @State private var isRefreshingModels = false
+    @State private var lastModelsRefreshAt: Date?
 
     private let runtimeAutoValue = "__AUTO__"
     private let runtimeNormalValue = "__NORMAL__"
@@ -24,9 +25,10 @@ struct SettingsView: View {
                 SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
                 SettingsGPTAccountCard()
-                SettingsSubscriptionCard()
+                SettingsSelfHostedBuildCard()
                 SettingsBridgeVersionCard()
                 runtimeDefaultsSection
+                SettingsCustomModelsCard()
                 SettingsAboutCard()
                 SettingsUsageCard()
                 connectionSection
@@ -43,12 +45,6 @@ struct SettingsView: View {
                     systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
                 )
             }
-        }
-        .task {
-            guard subscriptions.bootstrapState == .idle else {
-                return
-            }
-            await subscriptions.bootstrap()
         }
     }
 
@@ -76,6 +72,47 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .tint(settingsAccentColor)
+            }
+
+            Text("Refresh the latest model list from the Codex runtime currently running on your Mac (Codex App / CLI).")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Text("Detected")
+                Spacer()
+                Text("\(runtimeModelOptions.count) models")
+                    .foregroundStyle(.secondary)
+            }
+
+            if let lastModelsRefreshAt {
+                HStack {
+                    Text("Last refresh")
+                    Spacer()
+                    Text(lastModelsRefreshAt.formatted(date: .abbreviated, time: .shortened))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            SettingsButton(
+                isRefreshingModels ? "Refreshing Models..." : "Refresh Models From Mac",
+                isLoading: isRefreshingModels
+            ) {
+                refreshModelsFromMac()
+            }
+            .disabled(!codex.isConnected || isRefreshingModels)
+
+            if !codex.isConnected {
+                Text("Connect to your Mac before refreshing the model list.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let modelsErrorMessage = codex.modelsErrorMessage,
+               !modelsErrorMessage.isEmpty {
+                Text(modelsErrorMessage)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
             }
 
             HStack {
@@ -222,15 +259,38 @@ struct SettingsView: View {
         }
     }
 
+    private func refreshModelsFromMac() {
+        guard codex.isConnected, !isRefreshingModels else { return }
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        isRefreshingModels = true
+
+        Task {
+            defer {
+                Task { @MainActor in
+                    isRefreshingModels = false
+                }
+            }
+
+            do {
+                try await codex.listModels()
+                await MainActor.run {
+                    lastModelsRefreshAt = Date()
+                }
+            } catch {
+                // CodexService already exposes a user-facing modelsErrorMessage.
+            }
+        }
+    }
+
     // MARK: - Runtime bindings
 
     private var runtimeModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+        TurnComposerMetaMapper.orderedModels(from: codex.mergedAvailableModels())
     }
 
     private var runtimeReasoningOptions: [TurnComposerReasoningDisplayOption] {
         TurnComposerMetaMapper.reasoningDisplayOptions(
-            from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+            from: codex.supportedReasoningEffortsForSelectedModel()
         )
     }
 
@@ -279,49 +339,358 @@ struct SettingsView: View {
     }
 }
 
-private struct SettingsSubscriptionCard: View {
-    @Environment(SubscriptionService.self) private var subscriptions
-    @State private var isPresentingPaywall = false
-
+private struct SettingsSelfHostedBuildCard: View {
     var body: some View {
-        SettingsCard(title: "Remodex Pro") {
+        SettingsCard(title: "Self-Hosted Build") {
+            Text("In-app purchases are removed in this self-hosted build so it can run under a Personal Team profile.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
             HStack {
                 Text("Status")
                 Spacer()
-                Text(subscriptions.hasProAccess ? "Active" : "Free")
-                    .foregroundStyle(subscriptions.hasProAccess ? .green : .secondary)
+                Text("Unlocked")
+                    .foregroundStyle(.green)
             }
+        }
+    }
+}
 
-            if subscriptions.hasProAccess {
-                Text("Your Pro access is active. You can still restore purchases or manage your subscription from Apple.")
+private enum SettingsCustomModelReasoningMode: String, CaseIterable, Identifiable {
+    case inheritDefault = "inherit_default"
+    case custom
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .inheritDefault:
+            return "Inherit Default"
+        case .custom:
+            return "Custom"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .inheritDefault:
+            return "Use the built-in OpenAI-style reasoning levels."
+        case .custom:
+            return "Define the raw level names and labels this model should expose."
+        }
+    }
+}
+
+private struct SettingsCustomModelReasoningLevelDraft: Identifiable {
+    let id: UUID
+    var effort: String
+    var displayName: String
+
+    init(id: UUID = UUID(), effort: String = "", displayName: String = "") {
+        self.id = id
+        self.effort = effort
+        self.displayName = displayName
+    }
+}
+
+private struct SettingsCustomModelDraft {
+    var editingModelID: String?
+    var model = ""
+    var displayName = ""
+    var reasoningMode: SettingsCustomModelReasoningMode = .inheritDefault
+    var defaultReasoningEffort = CodexModelOption.inheritedDefaultReasoningEffort
+    var reasoningLevels: [SettingsCustomModelReasoningLevelDraft] = []
+
+    init() {}
+
+    init(modelOption: CodexModelOption) {
+        editingModelID = modelOption.id
+        model = modelOption.model
+        displayName = modelOption.displayName
+        defaultReasoningEffort = modelOption.defaultReasoningEffort ?? CodexModelOption.inheritedDefaultReasoningEffort
+
+        if modelOption.inheritsOpenAIDefaultReasoningEfforts || modelOption.supportedReasoningEfforts.isEmpty {
+            reasoningMode = .inheritDefault
+            reasoningLevels = []
+        } else {
+            reasoningMode = .custom
+            reasoningLevels = modelOption.supportedReasoningEfforts.map { option in
+                SettingsCustomModelReasoningLevelDraft(
+                    effort: option.reasoningEffort,
+                    displayName: option.displayName ?? TurnComposerMetaMapper.reasoningTitle(for: option)
+                )
+            }
+        }
+    }
+}
+
+private struct SettingsCustomModelsCard: View {
+    @Environment(CodexService.self) private var codex
+
+    @State private var draft = SettingsCustomModelDraft()
+
+    var body: some View {
+        SettingsCard(title: "Custom Models") {
+            Text("Add or edit models manually when your Mac-side Codex runtime supports them before the detected list catches up.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
+            TextField("Model name", text: $draft.model)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(AppFont.mono(.subheadline))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            TextField("Display name", text: $draft.displayName)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(AppFont.body())
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            Picker("Reasoning levels", selection: $draft.reasoningMode) {
+                ForEach(SettingsCustomModelReasoningMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(draft.reasoningMode.subtitle)
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
+            if draft.reasoningMode == .inheritDefault {
+                Text("Default levels: Low, Medium, High, Extra High.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             } else {
-                Text("Open the custom paywall to choose a monthly or yearly plan.")
-                    .font(AppFont.caption())
+                customReasoningEditor
+            }
+
+            HStack(spacing: 10) {
+                SettingsButton(draft.editingModelID == nil ? "Save Custom Model" : "Update Custom Model") {
+                    saveDraft()
+                }
+                .disabled(isSaveDisabled)
+
+                if draft.editingModelID != nil {
+                    Button("Cancel") {
+                        resetDraft()
+                    }
+                    .font(AppFont.caption(weight: .medium))
                     .foregroundStyle(.secondary)
-            }
-
-            SettingsButton(subscriptions.hasProAccess ? "View Pro" : "Upgrade to Pro") {
-                isPresentingPaywall = true
-            }
-
-            SettingsButton(subscriptions.isRestoring ? "Restoring..." : "Restore Purchases", isLoading: subscriptions.isRestoring) {
-                Task {
-                    await subscriptions.restorePurchases()
                 }
             }
-            .disabled(subscriptions.isPurchasing)
 
-            if let error = subscriptions.lastErrorMessage, !error.isEmpty {
-                Text(error)
+            if codex.customModelOptions.isEmpty {
+                Text("No custom models added yet.")
                     .font(AppFont.caption())
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(codex.customModelOptions, id: \.id) { model in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(model.displayName)
+                                .font(AppFont.subheadline(weight: .semibold))
+                            Spacer()
+                            Button("Edit") {
+                                startEditing(model)
+                            }
+                            .font(AppFont.caption(weight: .medium))
+                            Button("Delete", role: .destructive) {
+                                codex.removeCustomModel(id: model.id)
+                                if draft.editingModelID == model.id {
+                                    resetDraft()
+                                }
+                            }
+                            .font(AppFont.caption(weight: .medium))
+                        }
+
+                        Text(model.model)
+                            .font(AppFont.mono(.caption))
+                            .foregroundStyle(.secondary)
+
+                        Text(reasoningSummary(for: model))
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                }
             }
         }
-        .sheet(isPresented: $isPresentingPaywall) {
-            RevenueCatPaywallView()
+        .onChange(of: draft.reasoningMode) { _, newValue in
+            if newValue == .custom, draft.reasoningLevels.isEmpty {
+                addReasoningLevel()
+            }
         }
+    }
+
+    @ViewBuilder private var customReasoningEditor: some View {
+        if draft.reasoningLevels.isEmpty {
+            Text("No custom reasoning levels yet.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+        }
+
+        ForEach(draft.reasoningLevels.indices, id: \.self) { index in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Level \(index + 1)")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Remove", role: .destructive) {
+                        removeReasoningLevel(at: index)
+                    }
+                    .font(AppFont.caption(weight: .medium))
+                }
+
+                TextField("Level name (for example: extra_high)", text: $draft.reasoningLevels[index].effort)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(AppFont.mono(.caption))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                TextField("Display name (for example: Extra High)", text: $draft.reasoningLevels[index].displayName)
+                    .textInputAutocapitalization(.words)
+                    .autocorrectionDisabled()
+                    .font(AppFont.body())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
+
+        Button("Add Reasoning Level") {
+            addReasoningLevel()
+        }
+        .font(AppFont.caption(weight: .medium))
+    }
+
+    private var trimmedModel: String {
+        draft.model.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedDisplayName: String {
+        draft.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var normalizedReasoningLevels: [CodexReasoningEffortOption] {
+        var normalizedLevels: [CodexReasoningEffortOption] = []
+        var seenEfforts: Set<String> = []
+
+        for level in draft.reasoningLevels {
+            let normalizedEffort = level.effort.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedDisplayName = level.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lookupKey = normalizedEffort.lowercased()
+            guard !normalizedEffort.isEmpty,
+                  !normalizedDisplayName.isEmpty,
+                  !seenEfforts.contains(lookupKey) else {
+                continue
+            }
+
+            seenEfforts.insert(lookupKey)
+            normalizedLevels.append(
+                CodexReasoningEffortOption(
+                    reasoningEffort: normalizedEffort,
+                    displayName: normalizedDisplayName
+                )
+            )
+        }
+
+        return normalizedLevels
+    }
+
+    private var resolvedDefaultReasoningEffort: String? {
+        if draft.reasoningMode == .inheritDefault {
+            return CodexModelOption.inheritedDefaultReasoningEffort
+        }
+
+        let normalizedDefault = draft.defaultReasoningEffort.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedReasoningLevels.contains(where: { $0.reasoningEffort == normalizedDefault }) {
+            return normalizedDefault
+        }
+        return normalizedReasoningLevels.first?.reasoningEffort
+    }
+
+    private var isSaveDisabled: Bool {
+        if trimmedModel.isEmpty || trimmedDisplayName.isEmpty {
+            return true
+        }
+
+        if draft.reasoningMode == .custom {
+            return normalizedReasoningLevels.isEmpty
+        }
+
+        return false
+    }
+
+    private func addReasoningLevel() {
+        draft.reasoningLevels.append(SettingsCustomModelReasoningLevelDraft())
+    }
+
+    private func removeReasoningLevel(at index: Int) {
+        guard draft.reasoningLevels.indices.contains(index) else {
+            return
+        }
+        let removedLevel = draft.reasoningLevels.remove(at: index)
+        if draft.defaultReasoningEffort == removedLevel.effort {
+            draft.defaultReasoningEffort = normalizedReasoningLevels.first?.reasoningEffort ?? ""
+        }
+    }
+
+    private func resetDraft() {
+        draft = SettingsCustomModelDraft()
+    }
+
+    private func startEditing(_ model: CodexModelOption) {
+        draft = SettingsCustomModelDraft(modelOption: model)
+        if draft.reasoningMode == .custom, draft.reasoningLevels.isEmpty {
+            addReasoningLevel()
+        }
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+    }
+
+    private func reasoningSummary(for model: CodexModelOption) -> String {
+        if model.inheritsOpenAIDefaultReasoningEfforts {
+            return "Reasoning: OpenAI/default levels"
+        }
+
+        let labels = model.supportedReasoningEfforts.compactMap { option in
+            let displayName = option.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let displayName, !displayName.isEmpty {
+                return displayName
+            }
+            return TurnComposerMetaMapper.reasoningTitle(for: option)
+        }
+        if labels.isEmpty {
+            return "Reasoning: none configured"
+        }
+
+        return "Reasoning: " + labels.joined(separator: ", ")
+    }
+
+    private func saveDraft() {
+        let model = trimmedModel
+        let displayName = trimmedDisplayName
+        guard !model.isEmpty, !displayName.isEmpty else {
+            return
+        }
+
+        codex.saveCustomModel(
+            model: model,
+            displayName: displayName,
+            inheritsOpenAIDefaultReasoningEfforts: draft.reasoningMode == .inheritDefault,
+            supportedReasoningEfforts: draft.reasoningMode == .inheritDefault ? [] : normalizedReasoningLevels,
+            defaultReasoningEffort: resolvedDefaultReasoningEffort
+        )
+        resetDraft()
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
     }
 }
 

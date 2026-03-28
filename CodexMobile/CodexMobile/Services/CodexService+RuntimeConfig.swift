@@ -7,6 +7,45 @@
 import Foundation
 
 extension CodexService {
+    func mergedAvailableModels() -> [CodexModelOption] {
+        func mergeKey(for model: CodexModelOption) -> String {
+            let normalizedModel = model.model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if !normalizedModel.isEmpty {
+                return normalizedModel
+            }
+            return model.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+
+        var mergedByKey: [String: CodexModelOption] = [:]
+        var insertionOrder: [String] = []
+
+        for model in availableModels {
+            let key = mergeKey(for: model)
+            guard !key.isEmpty else { continue }
+            if mergedByKey[key] == nil {
+                insertionOrder.append(key)
+            }
+            mergedByKey[key] = model
+        }
+
+        for customModel in customModelOptions {
+            let key = mergeKey(for: customModel)
+            guard !key.isEmpty else { continue }
+            if let serverModel = mergedByKey[key] {
+                mergedByKey[key] = customModel.mergedWithRuntimeFallback(serverModel)
+            } else {
+                insertionOrder.append(key)
+                mergedByKey[key] = customModel
+            }
+        }
+
+        var mergedModels = insertionOrder.compactMap { mergedByKey[$0] }
+        if let placeholderModel = selectedModelPlaceholderIfNeeded(from: mergedModels) {
+            mergedModels.append(placeholderModel)
+        }
+        return mergedModels
+    }
+
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
         guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
@@ -86,10 +125,88 @@ extension CodexService {
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
+    func saveCustomModel(
+        model: String,
+        displayName: String,
+        inheritsOpenAIDefaultReasoningEfforts: Bool,
+        supportedReasoningEfforts: [CodexReasoningEffortOption],
+        defaultReasoningEffort: String?
+    ) {
+        let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedModel.isEmpty, !normalizedDisplayName.isEmpty else {
+            return
+        }
+
+        let normalizedSupportedReasoningEfforts = supportedReasoningEfforts.filter {
+            !$0.reasoningEffort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let supportedReasoningEffortsSet = Set(normalizedSupportedReasoningEfforts.map(\.reasoningEffort))
+        let normalizedDefaultReasoningEffort = defaultReasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedDefaultReasoningEffort: String?
+        if inheritsOpenAIDefaultReasoningEfforts {
+            resolvedDefaultReasoningEffort = normalizedDefaultReasoningEffort
+        } else if let normalizedDefaultReasoningEffort,
+                  supportedReasoningEffortsSet.contains(normalizedDefaultReasoningEffort) {
+            resolvedDefaultReasoningEffort = normalizedDefaultReasoningEffort
+        } else {
+            resolvedDefaultReasoningEffort = normalizedSupportedReasoningEfforts.first?.reasoningEffort
+        }
+
+        let customModel = CodexModelOption(
+            id: normalizedModel,
+            model: normalizedModel,
+            displayName: normalizedDisplayName,
+            description: "Custom model",
+            isDefault: false,
+            isCustom: true,
+            supportedReasoningEfforts: normalizedSupportedReasoningEfforts,
+            defaultReasoningEffort: resolvedDefaultReasoningEffort,
+            inheritsOpenAIDefaultReasoningEfforts: inheritsOpenAIDefaultReasoningEfforts
+        )
+        let normalizedKey = normalizedModel.lowercased()
+
+        if let existingIndex = customModelOptions.firstIndex(where: {
+            $0.id.lowercased() == normalizedKey || $0.model.lowercased() == normalizedKey
+        }) {
+            customModelOptions[existingIndex] = customModel
+        } else {
+            customModelOptions.append(customModel)
+        }
+
+        persistCustomModelOptions()
+        normalizeRuntimeSelectionsAfterModelsUpdate()
+    }
+
+    func removeCustomModel(id: String) {
+        let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedID.isEmpty else {
+            return
+        }
+
+        customModelOptions.removeAll {
+            $0.id.lowercased() == normalizedID || $0.model.lowercased() == normalizedID
+        }
+        persistCustomModelOptions()
+        normalizeRuntimeSelectionsAfterModelsUpdate()
+    }
+
     func setSelectedReasoningEffort(_ effort: String?) {
         let normalized = effort?.trimmingCharacters(in: .whitespacesAndNewlines)
         selectedReasoningEffort = (normalized?.isEmpty == false) ? normalized : nil
         normalizeRuntimeSelectionsAfterModelsUpdate()
+    }
+
+    func setThreadModelOverride(_ modelIdentifier: String?, for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        let normalizedModelIdentifier = trimmedModelIdentifier(modelIdentifier)
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.modelIdentifier = normalizedModelIdentifier
+            override.overridesModel = normalizedModelIdentifier != nil
+        }
     }
 
     func setThreadReasoningEffortOverride(_ effort: String, for threadId: String?) {
@@ -167,12 +284,12 @@ extension CodexService {
         persistRuntimeSelections()
     }
 
-    func selectedModelOption() -> CodexModelOption? {
-        selectedModelOption(from: availableModels)
+    func selectedModelOption(threadId: String? = nil) -> CodexModelOption? {
+        selectedModelOption(from: mergedAvailableModels(), threadId: threadId)
     }
 
-    func supportedReasoningEffortsForSelectedModel() -> [CodexReasoningEffortOption] {
-        selectedModelOption()?.supportedReasoningEfforts ?? []
+    func supportedReasoningEffortsForSelectedModel(threadId: String? = nil) -> [CodexReasoningEffortOption] {
+        selectedModelOption(threadId: threadId)?.resolvedSupportedReasoningEfforts() ?? []
     }
 
     func isThreadReasoningEffortOverridden(_ threadId: String?) -> Bool {
@@ -183,7 +300,7 @@ extension CodexService {
         }
 
         let supportedReasoningEfforts = Set(
-            supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+            supportedReasoningEffortsForSelectedModel(threadId: threadId).map(\.reasoningEffort)
         )
         return supportedReasoningEfforts.contains(selectedReasoning)
     }
@@ -193,11 +310,12 @@ extension CodexService {
     }
 
     func selectedReasoningEffortForSelectedModel(threadId: String? = nil) -> String? {
-        guard let model = selectedModelOption() else {
+        guard let model = selectedModelOption(threadId: threadId) else {
             return nil
         }
 
-        let supported = Set(model.supportedReasoningEfforts.map { $0.reasoningEffort })
+        let resolvedSupportedReasoningEfforts = model.resolvedSupportedReasoningEfforts()
+        let supported = Set(resolvedSupportedReasoningEfforts.map { $0.reasoningEffort })
         guard !supported.isEmpty else {
             return nil
         }
@@ -214,20 +332,35 @@ extension CodexService {
             return selected
         }
 
-        if let defaultEffort = model.defaultReasoningEffort,
+        if let defaultEffort = model.resolvedDefaultReasoningEffort(),
            supported.contains(defaultEffort) {
             return defaultEffort
         }
 
-        if supported.contains("medium") {
-            return "medium"
+        if supported.contains(CodexModelOption.inheritedDefaultReasoningEffort) {
+            return CodexModelOption.inheritedDefaultReasoningEffort
         }
 
-        return model.supportedReasoningEfforts.first?.reasoningEffort
+        return resolvedSupportedReasoningEfforts.first?.reasoningEffort
     }
 
-    func runtimeModelIdentifierForTurn() -> String? {
-        selectedModelOption()?.model
+    func runtimeModelIdentifierForTurn(threadId: String? = nil) -> String? {
+        if let threadOverride = threadRuntimeOverride(for: threadId),
+           threadOverride.overridesModel,
+           let modelIdentifier = trimmedModelIdentifier(threadOverride.modelIdentifier) {
+            return modelIdentifier
+        }
+
+        if let threadModelIdentifier = threadModelIdentifier(for: threadId) {
+            return threadModelIdentifier
+        }
+
+        if let selectedModelIdentifier = selectedModelOption()?.model,
+           !selectedModelIdentifier.isEmpty {
+            return selectedModelIdentifier
+        }
+
+        return selectedModelIdentifier()
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
@@ -244,6 +377,34 @@ extension CodexService {
             return nil
         }
         return effectiveServiceTier(for: threadId)?.rawValue
+    }
+
+    func inheritRuntimeSelections(
+        from sourceThreadId: String?,
+        fallbackModelIdentifier: String? = nil,
+        fallbackRuntimeOverride: CodexThreadRuntimeOverride? = nil
+    ) {
+        let sourceOverride = fallbackRuntimeOverride ?? threadRuntimeOverride(for: sourceThreadId)
+        let sourceModelIdentifier = trimmedModelIdentifier(sourceOverride?.modelIdentifier)
+            ?? threadModelIdentifier(for: sourceThreadId)
+            ?? fallbackModelIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let sourceModelIdentifier,
+           !sourceModelIdentifier.isEmpty {
+            selectedModelId = sourceModelIdentifier
+        }
+
+        if let sourceOverride,
+           sourceOverride.overridesReasoning,
+           let reasoningEffort = sourceOverride.reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !reasoningEffort.isEmpty {
+            selectedReasoningEffort = reasoningEffort
+        }
+        if let sourceOverride,
+           sourceOverride.overridesServiceTier {
+            selectedServiceTier = sourceOverride.serviceTier
+        }
+
+        normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
     // Copies per-chat runtime overrides forward when we continue an archived thread.
@@ -381,8 +542,10 @@ private extension CodexService {
         mutate: (inout CodexThreadRuntimeOverride) -> Void
     ) {
         var currentOverride = threadRuntimeOverridesByThreadID[threadId] ?? CodexThreadRuntimeOverride(
+            modelIdentifier: nil,
             reasoningEffort: nil,
             serviceTierRawValue: nil,
+            overridesModel: false,
             overridesReasoning: false,
             overridesServiceTier: false
         )
@@ -399,28 +562,25 @@ private extension CodexService {
     }
 
     func normalizeRuntimeSelectionsAfterModelsUpdate() {
-        guard !availableModels.isEmpty else {
-            persistRuntimeSelections()
-            return
-        }
-
-        let resolvedModel = selectedModelOption(from: availableModels) ?? fallbackModel(from: availableModels)
+        let mergedModels = mergedAvailableModels()
+        let resolvedModel = selectedModelOption(from: mergedModels) ?? fallbackModel(from: mergedModels)
         selectedModelId = resolvedModel?.id
 
         if let resolvedModel {
-            let supported = Set(resolvedModel.supportedReasoningEfforts.map { $0.reasoningEffort })
+            let resolvedSupportedReasoningEfforts = resolvedModel.resolvedSupportedReasoningEfforts()
+            let supported = Set(resolvedSupportedReasoningEfforts.map { $0.reasoningEffort })
             if supported.isEmpty {
                 selectedReasoningEffort = nil
             } else if let selectedReasoningEffort,
                       supported.contains(selectedReasoningEffort) {
                 // Keep current reasoning.
-            } else if let modelDefault = resolvedModel.defaultReasoningEffort,
+            } else if let modelDefault = resolvedModel.resolvedDefaultReasoningEffort(),
                       supported.contains(modelDefault) {
                 selectedReasoningEffort = modelDefault
-            } else if supported.contains("medium") {
-                selectedReasoningEffort = "medium"
+            } else if supported.contains(CodexModelOption.inheritedDefaultReasoningEffort) {
+                selectedReasoningEffort = CodexModelOption.inheritedDefaultReasoningEffort
             } else {
-                selectedReasoningEffort = resolvedModel.supportedReasoningEfforts.first?.reasoningEffort
+                selectedReasoningEffort = resolvedSupportedReasoningEfforts.first?.reasoningEffort
             }
         } else {
             selectedReasoningEffort = nil
@@ -429,14 +589,32 @@ private extension CodexService {
         persistRuntimeSelections()
     }
 
-    func selectedModelOption(from models: [CodexModelOption]) -> CodexModelOption? {
-        guard !models.isEmpty else {
-            return nil
+    func selectedModelOption(from models: [CodexModelOption], threadId: String? = nil) -> CodexModelOption? {
+        let resolvedModelIdentifier = runtimeModelIdentifierForTurn(threadId: threadId)
+            ?? selectedModelIdentifier()
+        let resolvedModelLookupKey = normalizedModelLookupKey(resolvedModelIdentifier)
+
+        if let resolvedModelLookupKey,
+           let directMatch = models.first(where: {
+               normalizedModelLookupKey($0.id) == resolvedModelLookupKey
+                   || normalizedModelLookupKey($0.model) == resolvedModelLookupKey
+           }) {
+            return directMatch
         }
 
-        if let selectedModelId,
-           let directMatch = models.first(where: { $0.id == selectedModelId || $0.model == selectedModelId }) {
-            return directMatch
+        if let resolvedModelIdentifier {
+            let placeholderReasoningEffort: String?
+            if let threadOverride = threadRuntimeOverride(for: threadId),
+               threadOverride.overridesReasoning {
+                placeholderReasoningEffort = threadOverride.reasoningEffort
+            } else {
+                placeholderReasoningEffort = selectedReasoningEffort
+            }
+
+            return CodexModelOption.placeholderModel(
+                identifier: resolvedModelIdentifier,
+                selectedReasoningEffort: placeholderReasoningEffort
+            )
         }
 
         return nil
@@ -447,6 +625,53 @@ private extension CodexService {
             return defaultModel
         }
         return models.first
+    }
+
+    func selectedModelIdentifier() -> String? {
+        trimmedModelIdentifier(selectedModelId)
+    }
+
+    func threadModelIdentifier(for threadId: String?) -> String? {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return nil
+        }
+        return trimmedModelIdentifier(thread(for: normalizedThreadID)?.model)
+    }
+
+    func selectedModelPlaceholderIfNeeded(from models: [CodexModelOption]) -> CodexModelOption? {
+        guard let selectedModelLookupKey = normalizedModelLookupKey(selectedModelId),
+              let selectedModelIdentifier = selectedModelIdentifier() else {
+            return nil
+        }
+
+        guard !models.contains(where: {
+            normalizedModelLookupKey($0.id) == selectedModelLookupKey
+                || normalizedModelLookupKey($0.model) == selectedModelLookupKey
+        }) else {
+            return nil
+        }
+
+        return CodexModelOption.placeholderModel(
+            identifier: selectedModelIdentifier,
+            selectedReasoningEffort: selectedReasoningEffort
+        )
+    }
+
+    func trimmedModelIdentifier(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        return trimmed
+    }
+
+    func normalizedModelLookupKey(_ value: String?) -> String? {
+        trimmedModelIdentifier(value)?.lowercased()
     }
 
     func persistRuntimeSelections() {
@@ -469,7 +694,18 @@ private extension CodexService {
         }
 
         defaults.set(selectedAccessMode.rawValue, forKey: Self.selectedAccessModeDefaultsKey)
+        persistCustomModelOptions()
         persistThreadRuntimeOverrides()
+    }
+
+    func persistCustomModelOptions() {
+        guard !customModelOptions.isEmpty,
+              let encodedCustomModels = try? encoder.encode(customModelOptions) else {
+            defaults.removeObject(forKey: Self.customModelOptionsDefaultsKey)
+            return
+        }
+
+        defaults.set(encodedCustomModels, forKey: Self.customModelOptionsDefaultsKey)
     }
 
     func persistThreadRuntimeOverrides() {

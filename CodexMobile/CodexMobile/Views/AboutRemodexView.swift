@@ -113,7 +113,7 @@ struct AboutRemodexView: View {
     private func diagramStep(from: String, to: String, via: String, isLast: Bool = false) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text(from)
+                Text(LocalizedStringKey(from))
                     .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
@@ -122,14 +122,14 @@ struct AboutRemodexView: View {
                     Image(systemName: "arrow.right")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.tertiary)
-                    Text(via)
+                    Text(LocalizedStringKey(via))
                         .font(AppFont.caption2())
                         .foregroundStyle(.secondary)
                         .italic()
                 }
                 .frame(width: 90)
 
-                Text(to)
+                Text(LocalizedStringKey(to))
                     .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -292,7 +292,7 @@ struct AboutRemodexView: View {
 
     @ViewBuilder
     private func sectionTitle(_ title: String) -> some View {
-        Text(title)
+        Text(LocalizedStringKey(title))
             .font(AppFont.headline(weight: .semibold))
             .foregroundStyle(.primary)
     }
@@ -346,12 +346,12 @@ struct AboutRemodexView: View {
     @ViewBuilder
     private func specRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label)
+            Text(LocalizedStringKey(label))
                 .font(AppFont.caption(weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 120, alignment: .leading)
 
-            Text(value)
+            Text(LocalizedStringKey(value))
                 .font(AppFont.mono(.caption))
                 .foregroundStyle(.primary)
         }

@@ -930,17 +930,17 @@ struct TurnView: View {
     // MARK: - Derived UI state
 
     private var orderedModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+        TurnComposerMetaMapper.orderedModels(from: codex.mergedAvailableModels())
     }
 
     private var reasoningDisplayOptions: [TurnComposerReasoningDisplayOption] {
         TurnComposerMetaMapper.reasoningDisplayOptions(
-            from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+            from: codex.supportedReasoningEffortsForSelectedModel(threadId: thread.id)
         )
     }
 
     private var selectedModelTitle: String {
-        guard let selectedModel = codex.selectedModelOption() else {
+        guard let selectedModel = codex.selectedModelOption(threadId: thread.id) else {
             return "Select model"
         }
 

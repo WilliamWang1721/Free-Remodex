@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - Preference
 
@@ -15,18 +16,30 @@ enum GlassPreference {
 
 private struct AdaptiveGlassModifier<S: Shape>: ViewModifier {
     @AppStorage(GlassPreference.storageKey) private var glassEnabled = true
+    @Environment(\.colorScheme) private var colorScheme
     let regularStyle: Bool
     let shape: S
 
     func body(content: Content) -> some View {
+        let brightFill = Color(uiColor: colorScheme == .dark ? .secondarySystemBackground : .systemBackground)
+            .opacity(regularStyle ? 0.9 : 0.82)
+        let borderColor = Color.white.opacity(colorScheme == .dark ? 0.08 : 0.42)
+
+        let softenedContent = content
+            .background(brightFill, in: shape)
+            .overlay {
+                shape
+                    .stroke(borderColor, lineWidth: 0.75)
+            }
+
         if #available(iOS 26, *), glassEnabled {
             if regularStyle {
-                content.glassEffect(.regular, in: shape)
+                softenedContent.glassEffect(.regular, in: shape)
             } else {
-                content.glassEffect(in: shape)
+                softenedContent.glassEffect(in: shape)
             }
         } else {
-            content.background(.thinMaterial, in: shape)
+            softenedContent.background(.ultraThinMaterial, in: shape)
         }
     }
 }

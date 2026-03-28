@@ -145,7 +145,7 @@ struct SidebarView: View {
             )
         }
         .confirmationDialog(
-            "Archive \"\(projectGroupPendingArchive?.label ?? "project")\"?",
+            L10n.string("Archive \"%@\"?", projectGroupPendingArchive?.label ?? L10n.string("project")),
             isPresented: Binding(
                 get: { projectGroupPendingArchive != nil },
                 set: { if !$0 { projectGroupPendingArchive = nil } }
@@ -162,7 +162,7 @@ struct SidebarView: View {
             Text("All active chats in this project will be archived.")
         }
         .confirmationDialog(
-            "Delete \"\(threadPendingDeletion?.displayTitle ?? "conversation")\"?",
+            L10n.string("Delete \"%@\"?", threadPendingDeletion?.displayTitle ?? L10n.string("conversation")),
             isPresented: Binding(
                 get: { threadPendingDeletion != nil },
                 set: { if !$0 { threadPendingDeletion = nil } }
@@ -194,7 +194,7 @@ struct SidebarView: View {
                 }
             },
             message: {
-                Text(createThreadErrorMessage ?? "Please try again.")
+                Text(createThreadErrorMessage ?? L10n.string("Please try again."))
             }
         )
     }
@@ -233,7 +233,7 @@ struct SidebarView: View {
             } catch {
                 let message = error.localizedDescription
                 codex.lastErrorMessage = message
-                createThreadErrorMessage = message.isEmpty ? "Unable to create a chat right now." : message
+                createThreadErrorMessage = message.isEmpty ? L10n.string("Unable to create a chat right now.") : message
             }
         }
     }

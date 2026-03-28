@@ -75,6 +75,21 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         XCTAssertEqual(service.effectiveServiceTier(for: "thread-new"), .fast)
     }
 
+
+    func testThreadSpecificModelPlaceholderSupportsMissingRuntimeModel() {
+        let service = makeService()
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5.4")
+        service.setThreadModelOverride("gpt-5.4-custom-preview", for: "thread-missing")
+        service.setThreadReasoningEffortOverride("extra_high", for: "thread-missing")
+
+        let selectedModel = service.selectedModelOption(threadId: "thread-missing")
+
+        XCTAssertEqual(selectedModel?.model, "gpt-5.4-custom-preview")
+        XCTAssertEqual(selectedModel?.displayName, "gpt-5.4-custom-preview")
+        XCTAssertEqual(service.selectedReasoningEffortForSelectedModel(threadId: "thread-missing"), "extra_high")
+    }
+
     func testStartThreadUsesProvidedRuntimeOverrideForServiceTier() async throws {
         let service = makeService()
         service.isConnected = true

@@ -77,11 +77,11 @@ struct OnboardingFeaturesPage: View {
                 )
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(LocalizedStringKey(title))
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.white)
 
-                Text(subtitle)
+                Text(LocalizedStringKey(subtitle))
                     .font(AppFont.caption())
                     .foregroundStyle(.white.opacity(0.4))
                     .lineLimit(2)

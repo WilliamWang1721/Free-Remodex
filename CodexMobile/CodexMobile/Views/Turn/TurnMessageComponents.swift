@@ -2,16 +2,16 @@
 // Purpose: SwiftUI views for rendering turn messages: MessageRow, ApprovalBanner, and subviews.
 // Layer: View Components
 // Exports: MessageRow, ApprovalBanner
-// Depends on: SwiftUI, Textual, TurnMessageRegexCache, SkillReferenceFormatter,
+// Depends on: SwiftUI, Foundation, TurnMessageRegexCache, SkillReferenceFormatter,
 //   ThinkingDisclosureParser, CodeCommentDirectiveParser, TurnFileChangeSummaryParser,
 //   TurnMessageCaches, TurnMarkdownModels, TurnDiffRenderer, CommandExecutionViews
 
+import Foundation
 import SwiftUI
-import Textual
 import UIKit
 
-// Keep Textual selection out of the scrolling timeline. This is shared by both
-// plain markdown rows and Mermaid-interleaved markdown segments.
+// Keep inline text selection out of the scrolling timeline. This is shared by
+// both plain markdown rows and Mermaid-interleaved markdown segments.
 let enablesInlineMarkdownSelectionInTimeline = false
 
 // ─── Message content views ──────────────────────────────────────────
@@ -51,24 +51,33 @@ private struct FileChangeInlineActionRow: View {
 /// Kept for explicit memory recovery without forcing cold parses on every thread switch.
 @MainActor
 enum MarkdownParseCacheReset {
-    static func reset() { CachingMarkdownParser.reset() }
+    static func reset() { MarkdownAttributedStringCache.reset() }
 }
 
-// Wraps the default Textual markdown parser with a bounded AttributedString
-// cache so Foundation's markdown parser is not re-run when LazyVStack
-// recycles a cell on upward scroll.
+// Keeps markdown parsing local-first and package-free for self-hosted builds.
 @MainActor
-private struct CachingMarkdownParser: MarkupParser {
-    static let shared = CachingMarkdownParser()
+private enum MarkdownAttributedStringCache {
     private static let cache = BoundedCache<String, AttributedString>(maxEntries: 128)
-    private let inner: AttributedStringMarkdownParser = .markdown()
 
-    func attributedString(for input: String) throws -> AttributedString {
+    static func attributedString(for input: String) -> AttributedString {
         let key = TurnTextCacheKey.key(namespace: "markdown-parser", text: input)
         if let cached = Self.cache.get(key) {
             return cached
         }
-        let result = try inner.attributedString(for: input)
+
+        let result: AttributedString
+        do {
+            result = try AttributedString(
+                markdown: input,
+                options: AttributedString.MarkdownParsingOptions(
+                    interpretedSyntax: .full,
+                    failurePolicy: .returnPartiallyParsedIfPossible
+                )
+            )
+        } catch {
+            result = AttributedString(input)
+        }
+
         Self.cache.set(key, value: result)
         return result
     }
@@ -85,16 +94,15 @@ struct MarkdownTextView: View {
 
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
-        // Keep prose on the app font, but let Textual own markdown/code layout to avoid block sizing regressions.
-        let baseView = StructuredText(transformed, parser: CachingMarkdownParser.shared)
-            .font(AppFont.body())
-            .textual.structuredTextStyle(.gitHub)
+        let rendered = MarkdownAttributedStringCache.attributedString(for: transformed)
 
         if enablesSelection {
-            baseView
-                .textual.textSelection(.enabled)
+            Text(rendered)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
-            baseView
+            Text(rendered)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -576,14 +584,37 @@ struct MessageRow: View, Equatable {
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
-        lhs.message == rhs.message
+        messagesAreVisuallyEquivalent(lhs.message, rhs.message)
             && lhs.isRetryAvailable == rhs.isRetryAvailable
             && lhs.assistantBlockAccessoryState == rhs.assistantBlockAccessoryState
             && lhs.showsStreamingAnimations == rhs.showsStreamingAnimations
     }
 
+    private static func messagesAreVisuallyEquivalent(_ lhs: CodexMessage, _ rhs: CodexMessage) -> Bool {
+        guard lhs.id == rhs.id else {
+            return false
+        }
+
+        if lhs.role == .assistant,
+           rhs.role == .assistant,
+           lhs.isStreaming,
+           rhs.isStreaming {
+            var lhsComparable = lhs
+            var rhsComparable = rhs
+            lhsComparable.text = ""
+            rhsComparable.text = ""
+            return lhsComparable == rhsComparable
+        }
+
+        return lhs == rhs
+    }
+
     // Computed once per body evaluation and reused by all sub-views.
     private var displayText: String {
+        if message.role == .assistant, message.isStreaming {
+            return ""
+        }
+
         let trimmedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if message.isStreaming {
             let placeholderTexts: Set<String> = [

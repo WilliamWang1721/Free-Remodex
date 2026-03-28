@@ -44,7 +44,7 @@ struct ArchivedChatsView: View {
         .navigationTitle("Archived Chats")
         .navigationBarTitleDisplayMode(.inline)
         .confirmationDialog(
-            "Delete \"\(threadPendingDeletion?.displayTitle ?? "conversation")\"?",
+            L10n.string("Delete \"%@\"?", threadPendingDeletion?.displayTitle ?? L10n.string("conversation")),
             isPresented: Binding(
                 get: { threadPendingDeletion != nil },
                 set: { if !$0 { threadPendingDeletion = nil } }

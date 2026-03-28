@@ -10,6 +10,26 @@ struct TurnTimelineProjection {
     let messages: [CodexMessage]
 }
 
+struct TurnTimelineTaskPhaseGroup: Identifiable, Equatable {
+    let id: String
+    let messages: [CodexMessage]
+    let assistantMessageID: String
+    let startedAt: Date
+    let finishedAt: Date
+
+    var messageIDs: [String] {
+        messages.map(\.id)
+    }
+
+    var stepCount: Int {
+        messages.count
+    }
+
+    var elapsed: TimeInterval {
+        max(0, finishedAt.timeIntervalSince(startedAt))
+    }
+}
+
 enum TurnTimelineReducer {
     // ─── ENTRY POINT ─────────────────────────────────────────────
 
@@ -36,6 +56,67 @@ enum TurnTimelineReducer {
         }
 
         return messages.last(where: { $0.role == .assistant && $0.isStreaming })?.id
+    }
+
+    // Groups contiguous tool/task system activity that immediately precedes a finalized
+    // assistant answer so the timeline can collapse it into a compact summary row.
+    static func taskPhaseGroups(in messages: [CodexMessage]) -> [TurnTimelineTaskPhaseGroup] {
+        guard messages.count > 1 else {
+            return []
+        }
+
+        var groups: [TurnTimelineTaskPhaseGroup] = []
+        var index = 0
+
+        while index < messages.count {
+            guard isCollapsibleTaskPhaseMessage(messages[index]) else {
+                index += 1
+                continue
+            }
+
+            let startIndex = index
+            var endIndex = index
+
+            while endIndex + 1 < messages.count,
+                  isCollapsibleTaskPhaseMessage(messages[endIndex + 1]) {
+                endIndex += 1
+            }
+
+            let assistantIndex = endIndex + 1
+            guard assistantIndex < messages.count else {
+                break
+            }
+
+            let assistantMessage = messages[assistantIndex]
+            guard isCompletedAssistantConclusion(assistantMessage) else {
+                index = assistantIndex
+                continue
+            }
+
+            let phaseMessages = Array(messages[startIndex...endIndex])
+            let timestamps = phaseMessages.map(\.createdAt) + [assistantMessage.createdAt]
+            let startedAt = timestamps.min() ?? assistantMessage.createdAt
+            let finishedAt = timestamps.max() ?? assistantMessage.createdAt
+            let turnLabel = normalizedIdentifier(assistantMessage.turnId)
+                ?? normalizedIdentifier(phaseMessages.last?.turnId)
+                ?? "turnless"
+            let firstMessageID = phaseMessages.first?.id ?? "phase"
+            let lastMessageID = phaseMessages.last?.id ?? firstMessageID
+
+            groups.append(
+                TurnTimelineTaskPhaseGroup(
+                    id: "\(turnLabel)|\(assistantMessage.id)|\(firstMessageID)|\(lastMessageID)",
+                    messages: phaseMessages,
+                    assistantMessageID: assistantMessage.id,
+                    startedAt: startedAt,
+                    finishedAt: finishedAt
+                )
+            )
+
+            index = assistantIndex + 1
+        }
+
+        return groups
     }
 
     // Ensures correct visual order within each turn: user → activity → assistant → trailing file changes.
@@ -133,6 +214,27 @@ enum TurnTimelineReducer {
         case .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
             return false
         }
+    }
+
+    private static func isCollapsibleTaskPhaseMessage(_ message: CodexMessage) -> Bool {
+        guard message.role == .system else {
+            return false
+        }
+
+        switch message.kind {
+        case .thinking, .toolActivity, .commandExecution, .subagentAction, .fileChange:
+            return true
+        case .chat, .plan, .userInputPrompt:
+            return false
+        }
+    }
+
+    private static func isCompletedAssistantConclusion(_ message: CodexMessage) -> Bool {
+        guard message.role == .assistant, !message.isStreaming else {
+            return false
+        }
+
+        return !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private static func intraTurnPriority(_ message: CodexMessage) -> Int {

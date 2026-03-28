@@ -9,7 +9,6 @@ import UIKit
 
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
 
@@ -83,15 +82,11 @@ struct ContentView: View {
                 codex.setForegroundState(phase != .background)
                 if phase == .active {
                     Task {
-                        async let subscriptionRefresh: Void = subscriptions.refreshCustomerInfoSilently()
-
                         guard hasSeenOnboarding, !isShowingManualScanner else {
-                            await subscriptionRefresh
                             return
                         }
 
                         await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
-                        await subscriptionRefresh
                     }
                 }
             }
@@ -176,10 +171,6 @@ struct ContentView: View {
             OnboardingView {
                 finishOnboardingAndShowScanner()
             }
-        } else if subscriptions.bootstrapState == .failed {
-            SubscriptionBootstrapFailureView()
-        } else if subscriptions.bootstrapState != .ready || !subscriptions.hasProAccess {
-            SubscriptionGateView()
         } else if shouldShowQRScanner {
             qrScannerBody
         } else {
